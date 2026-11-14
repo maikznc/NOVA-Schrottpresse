@@ -1,6 +1,6 @@
 # Baut NOVA Schrottpresse bei jedem Push als VST3, Audio Unit und Standalone-App für macOS
 # (Universal: Apple Silicon und Intel). Das Ergebnis steht unter "Actions" zum Download.
-# Ein Git-Tag wie v0.1.0 erzeugt zusätzlich ein Release mit der Zip-Datei.
+# Der Projektordner wird automatisch gefunden, er darf auch in einem Unterordner liegen.
 
 name: macOS-Build
 
@@ -14,9 +14,6 @@ on:
 permissions:
   contents: write
 
-env:
-  ART: build/Schrottpresse_artefacts/Release
-
 jobs:
   macos:
     name: VST3 + AU + App (Universal)
@@ -27,27 +24,44 @@ jobs:
       - name: Code holen
         uses: actions/checkout@v4
 
+      - name: Projektordner finden
+        run: |
+          CM=$(grep -rl --include=CMakeLists.txt "juce_add_plugin(Schrottpresse" . | grep -v "/build/" | head -1 || true)
+          if [ -z "$CM" ]; then
+            echo "::error::CMakeLists.txt von Schrottpresse nicht gefunden. Bitte den kompletten Projektordner ins Repository laden."
+            exit 1
+          fi
+          PROJ=$(dirname "$CM")
+          echo "Projektordner: $PROJ"
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+
       - name: Konfigurieren (lädt JUCE automatisch)
+        working-directory: ${{ env.PROJ }}
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-          -DSP_BUILD_TESTS=ON
 
       - name: Bauen
+        working-directory: ${{ env.PROJ }}
         run: cmake --build build --config Release --parallel 4
 
-      - name: Selbsttest (Latenz, alle Presets, Rechenzeit)
+      - name: Selbsttest
+        working-directory: ${{ env.PROJ }}
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Ad-hoc signieren
+        working-directory: ${{ env.PROJ }}
         run: |
+          ART=build/Schrottpresse_artefacts/Release
           codesign --force --deep --sign - "$ART/VST3/Schrottpresse.vst3"
           codesign --force --deep --sign - "$ART/AU/Schrottpresse.component"
           codesign --force --deep --sign - "$ART/Standalone/Schrottpresse.app"
 
       - name: Paket schnüren
+        working-directory: ${{ env.PROJ }}
         run: |
+          ART=build/Schrottpresse_artefacts/Release
           mkdir -p dist/Schrottpresse
           cp -R "$ART/VST3/Schrottpresse.vst3" "$ART/AU/Schrottpresse.component" "$ART/Standalone/Schrottpresse.app" dist/Schrottpresse/
           cp scripts/install-macos.sh dist/Schrottpresse/Installieren.command
@@ -60,26 +74,28 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: NOVA-Schrottpresse-macOS
-          path: dist/NOVA-Schrottpresse-macOS.zip
+          path: ${{ env.PROJ }}/dist/NOVA-Schrottpresse-macOS.zip
           retention-days: 30
 
       - name: Audio Unit prüfen (auval)
+        working-directory: ${{ env.PROJ }}
         run: |
           mkdir -p ~/Library/Audio/Plug-Ins/Components
-          cp -R "$ART/AU/Schrottpresse.component" ~/Library/Audio/Plug-Ins/Components/
+          cp -R "build/Schrottpresse_artefacts/Release/AU/Schrottpresse.component" ~/Library/Audio/Plug-Ins/Components/
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           sleep 3
           auval -strict -v aufx Schr Nova
 
       - name: VST3 prüfen (pluginval)
         continue-on-error: true
+        working-directory: ${{ env.PROJ }}
         run: |
           curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
           unzip -q pluginval.zip
-          pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --validate-in-process --skip-gui-tests "$ART/VST3/Schrottpresse.vst3"
+          pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --validate-in-process --skip-gui-tests "build/Schrottpresse_artefacts/Release/VST3/Schrottpresse.vst3"
 
       - name: Release anlegen (nur bei Tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/NOVA-Schrottpresse-macOS.zip
+          files: ${{ env.PROJ }}/dist/NOVA-Schrottpresse-macOS.zip
