@@ -1,0 +1,85 @@
+# Baut NOVA Schrottpresse bei jedem Push als VST3, Audio Unit und Standalone-App für macOS
+# (Universal: Apple Silicon und Intel). Das Ergebnis steht unter "Actions" zum Download.
+# Ein Git-Tag wie v0.1.0 erzeugt zusätzlich ein Release mit der Zip-Datei.
+
+name: macOS-Build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ART: build/Schrottpresse_artefacts/Release
+
+jobs:
+  macos:
+    name: VST3 + AU + App (Universal)
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Code holen
+        uses: actions/checkout@v4
+
+      - name: Konfigurieren (lädt JUCE automatisch)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DSP_BUILD_TESTS=ON
+
+      - name: Bauen
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Selbsttest (Latenz, alle Presets, Rechenzeit)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Ad-hoc signieren
+        run: |
+          codesign --force --deep --sign - "$ART/VST3/Schrottpresse.vst3"
+          codesign --force --deep --sign - "$ART/AU/Schrottpresse.component"
+          codesign --force --deep --sign - "$ART/Standalone/Schrottpresse.app"
+
+      - name: Paket schnüren
+        run: |
+          mkdir -p dist/Schrottpresse
+          cp -R "$ART/VST3/Schrottpresse.vst3" "$ART/AU/Schrottpresse.component" "$ART/Standalone/Schrottpresse.app" dist/Schrottpresse/
+          cp scripts/install-macos.sh dist/Schrottpresse/Installieren.command
+          chmod +x dist/Schrottpresse/Installieren.command
+          cp scripts/LIESMICH.txt dist/Schrottpresse/
+          cp -R build/render dist/Schrottpresse/Klangbeispiele
+          cd dist && ditto -c -k --keepParent Schrottpresse NOVA-Schrottpresse-macOS.zip
+
+      - name: Hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-Schrottpresse-macOS
+          path: dist/NOVA-Schrottpresse-macOS.zip
+          retention-days: 30
+
+      - name: Audio Unit prüfen (auval)
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "$ART/AU/Schrottpresse.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 3
+          auval -strict -v aufx Schr Nova
+
+      - name: VST3 prüfen (pluginval)
+        continue-on-error: true
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          pluginval.app/Contents/MacOS/pluginval --strictness-level 5 --validate-in-process --skip-gui-tests "$ART/VST3/Schrottpresse.vst3"
+
+      - name: Release anlegen (nur bei Tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NOVA-Schrottpresse-macOS.zip
